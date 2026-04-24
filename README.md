@@ -61,4 +61,15 @@ NUM_GPUS \
 --work-dir ./work_dirs/test \
 --out ./work_dirs/test/inference_result.pkl
  ```
+### Citation
+```
+@article{尚毅涵 2026 DGD-SAM：一种用于水下图像实例分割的动态引导SAM,
+title={DGD-SAM：一种用于水下图像实例分割的动态引导SAM},
+author={尚毅涵 and 董兴辉},
+journal={电子学报},
+pages={1-13},
+year={2026},
+doi={10.12263/DZXB.C251002.R1},
+}
+```
 
