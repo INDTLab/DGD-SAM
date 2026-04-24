@@ -1,4 +1,4 @@
-![](DGD-SAM_head.png)
+![](./imgs/DGD-SAM_head.png)
 
 <p align="center"> 
 <!-- <a href="https://www.sciencedirect.com/science/article/abs/pii/S0031320324002188" ><img src="https://img.shields.io/badge/HOME-PR-blue.svg"></a> -->
