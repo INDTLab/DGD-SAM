@@ -1,0 +1,535 @@
+_base_ = ['_base_/rsprompter_anchor.py']
+
+
+default_hooks = dict(
+    timer=dict(type='IterTimerHook'),
+    logger=dict(type='LoggerHook', interval=100),
+    param_scheduler=dict(type='ParamSchedulerHook'),
+    checkpoint=dict(type='CheckpointHook', interval=1, max_keep_ckpts=2, save_best=['coco/bbox_mAP', 'coco/segm_mAP'], rule='greater',
+                    save_last=True),
+    sampler_seed=dict(type='DistSamplerSeedHook'),
+    # visualization=dict(type='DetVisualizationHook', draw=True, interval=1, test_out_dir='vis_data')
+)
+
+# 添加自定义 Hook的配置
+custom_hooks = [
+    dict(type='EpochInfoHook', priority='NORMAL'),
+    dict(type='CustomFileLoggerHook', file_path="/data2/yihan/MyProject/RSPrompter-release/mmdet/rsprompter/__init__.py", priority='NORMAL'),
+    # dict(type='CustomFileLoggerHook', file_path="/data3/yihan/MyProject/RSPrompter-release/mmdet/rsprompter/__init__.py", priority='NORMAL'),
+    # dict(type='IgnoreOOMHook', priority='NORMAL'),
+    # dict(type='EvalTestHook',test_dataloader_cfg=test_dataloader,test_evaluator_cfg=test_evaluator) # 如果训练集和测试集不是同一个，就使用EvalTestHook
+]
+# crop_size = (512, 512)
+crop_size = (768, 768)
+# crop_size = (1024, 576) # 差
+crop_size = (576, 1024) # 优
+# crop_size = (1024, 1024)
+# crop_size = (480, 480)
+# crop_size = (384, 384) # vit_l用
+decoder_layers = 2
+
+vis_backends = [dict(type='LocalVisBackend'),
+                dict(type='WandbVisBackend', init_kwargs=dict(project='rsprompter-nwpu', group='rsprompter-anchor',
+                                                              name="rsprompter_anchor-nwpu-peft-512"))
+                ]
+visualizer = dict(
+    type='DetLocalVisualizer', vis_backends=vis_backends, name='visualizer')
+
+num_classes = 4
+prompt_shape = (100, 5)  # (per img pointset, per pointset point)
+
+#### should be changed when using different pretrain model
+
+# sam base model
+hf_sam_pretrain_name = "/data2/yihan/MyProject/RSPrompter-release/sam-vit-base"
+# hf_sam_pretrain_name = "/data3/yihan/MyProject/RSPrompter-release/sam-vit-base"
+# hf_sam_pretrain_name = "/root/shared-nvme/MyProject/RSPrompter-release/sam-vit-base"
+
+hf_sam_pretrain_ckpt_path = "/data2/yihan/MyProject/RSPrompter-release/sam-vit-base/pytorch_model.bin"
+# hf_sam_pretrain_ckpt_path = "/data3/yihan/MyProject/RSPrompter-release/sam-vit-base/pytorch_model.bin"
+# hf_sam_pretrain_ckpt_path = "/root/shared-nvme/MyProject/RSPrompter-release/sam-vit-base/pytorch_model.bin"
+
+
+batch_augments = [
+    dict(
+        type='BatchFixedSizePad', # 指定数据增强类型为 批量固定尺寸填充，即对每个图像进行填充，确保所有图像的尺寸统一为固定值。
+        size=crop_size, # 指定目标填充后的尺寸，所有图像将被填充或裁剪为这个大小。
+        img_pad_value=0, # 指定填充区域的值，默认值为 0
+        pad_mask=True, # 是否对掩膜进行填充
+        mask_pad_value=0, # 指定填充掩膜的值
+        pad_seg=False # 是否填充分割标注,不对分割标注进行填充操作，是因为已经有了pad_mask
+    )
+]
+
+# data_preprocessor = dict(
+#     type='DetDataPreprocessor', # 为目标检测任务设计的预处理模块，能够处理图像的归一化、颜色转换、图像尺寸调整等
+#     mean=[0.485 * 255, 0.456 * 255, 0.406 * 255], # 指定图像的均值，用于模型输入的数据 x的归一化
+#     std=[0.229 * 255, 0.224 * 255, 0.225 * 255], # 指定图像的标准差，用于模型输入的数据 x的归一化
+#     bgr_to_rgb=True, # 是否将图像的通道顺序从 BGR 转换为 RGB
+#     pad_mask=True, # 是否对掩膜（mask）进行填充，则掩膜会被填充至图像的目标尺寸（在 train_pipeline 或 batch_augments 中定义）
+#     pad_size_divisor=32, # 指定填充后的图像尺寸应当是 32 的倍数。
+#     batch_augments=batch_augments # 在数据批处理阶段应用的增强操作
+# )
+data_preprocessor = dict(
+    # ★data_preprocessor+batch_augments，才真正使得batch中图像变成(512,512)尺寸
+    type='DualDetDataPreprocessor', # 使用自定义预处理器
+    # RGB参数保持原样
+    mean=[0.485 * 255, 0.456 * 255, 0.406 * 255], # RGB图像的 R、G、B三个通道的 mean值
+    std=[0.229 * 255, 0.224 * 255, 0.225 * 255], # RGB图像的 R、G、B三个通道的 std
+    bgr_to_rgb=True,
+    pad_mask=True,
+    pad_size_divisor=32,
+    # 新增深度图参数
+    depth_mean=[0.437 * 255, 0.484 * 255, 0.482 * 255],  # RGB顺序
+    depth_std=[0.430 * 255, 0.411 * 255, 0.422 * 255],  # 示例值，需替换为实际值
+    batch_augments=batch_augments
+)
+
+model = dict(
+    type='SAM_Anchor_Prompt',
+    data_preprocessor=data_preprocessor,
+    decoder_freeze=False,
+    num_classes=num_classes,
+    shared_image_embedding=dict(
+        type='RSSamPositionalEmbedding',
+        hf_pretrain_name=hf_sam_pretrain_name,
+        init_cfg=dict(type='Pretrained', checkpoint=hf_sam_pretrain_ckpt_path),
+    ),
+    loss_proposal=dict(
+        type='CrossEntropyLoss',
+        use_sigmoid=False,
+        loss_weight=20.0,
+        reduction='mean',
+        class_weight=[1.0] * num_classes + [0.1]
+    ),
+    num_queries=prompt_shape[0],
+    backbone=dict(
+        _delete_=True,
+        # img_size=crop_size[0],
+        img_size=crop_size,
+        # type='MMPretrainSamVisionEncoder', # 不使用DVT
+        # type='MyPretrainEncoder_DVT', # 使用DVT
+        # type='MyPretrainEncoder_Adapter', # 使用Adapter
+        # type='LoRA_Adapter_PretrainSamVisionEncoder', # 使用LoRA + Adapter
+        type='UCTNet_PretrainSamViT',
+        hf_pretrain_name=hf_sam_pretrain_name,
+        init_cfg=dict(type='Pretrained', checkpoint=hf_sam_pretrain_ckpt_path),
+        # peft_config=None, # 冻结backbone
+        # peft_config={}, # 全量训练backbone
+        peft_config=dict( # LORA微调backbone
+            peft_type="LORA",
+            r=16,
+            target_modules=["qkv"],
+            lora_alpha=32,
+            lora_dropout=0.05,
+            bias="none",
+        ),
+    ),
+
+    neck=dict(
+        type='RSFPN',
+        # feature_aggregator=dict(
+        #     type='RSFeatureAggregator',
+        #     in_channels=hf_sam_pretrain_name,
+        #     out_channels=256,
+        #     # select_layers=range(1, 13, 2),
+        #     hidden_channels=32,
+        #     select_layers=range(1, 24+1, 2),# vit-base: range(1, 13, 2), large: range(1, 25, 2), huge: range(1, 33, 2)
+        # ), # 不用LORA微调，neck就用RSFeatureAggregator
+        feature_aggregator=dict(
+            _delete_=True,
+            type='PseudoFeatureAggregator',
+            in_channels=256,
+            hidden_channels=512,
+            out_channels=256,
+        ), # 用LORA微调，neck就用PseudoFeatureAggregator
+        feature_spliter=dict(
+            type='RSSimpleFPN',
+            backbone_channel=256,
+            in_channels=[64, 128, 256, 256],
+            out_channels=256,
+            num_outs=5,
+            norm_cfg=dict(type='LN2d', requires_grad=True)
+        ),
+    ),
+    # prompt_encoder=dict(
+    #     type='SAM_Prompt_Encoder',
+    #     hf_pretrain_name=hf_sam_pretrain_name,
+    #     init_cfg=dict(type='Pretrained', checkpoint=hf_sam_pretrain_ckpt_path)
+    # ),
+    rpn_head=dict(
+        type='RPNHead',
+        in_channels=256,
+        feat_channels=256,
+        anchor_generator=dict(
+            type='AnchorGenerator',
+            scales=[4, 8],
+            ratios=[0.5, 1.0, 2.0],
+            strides=[4, 8, 16, 32, 64]),
+        bbox_coder=dict(
+            type='DeltaXYWHBBoxCoder',
+            target_means=[.0, .0, .0, .0],
+            target_stds=[1.0, 1.0, 1.0, 1.0]),
+        loss_cls=dict(
+            type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
+        loss_bbox=dict(type='SmoothL1Loss', loss_weight=1.0)
+    ),
+    roi_head=dict(
+        type='MyPrompterAnchorRoIPromptHead',
+        # 叠加几层 mask decoder
+        decoder_layers = decoder_layers,
+        with_extra_pe=True,
+        # with_extra_pe=False, # 2025-02-18如果没改成8通道，就试试不加 extra_pe
+        bbox_roi_extractor=dict(
+            type='SingleRoIExtractor', # RoI Align操作，根据RoI区域在原图中的坐标，从特征图中框出7x7大小的特征矩阵
+            roi_layer=dict(type='RoIAlign', output_size=7, sampling_ratio=0),
+            out_channels=256,
+            featmap_strides=[4, 8, 16, 32]),
+        # 计算cls损失、bbox损失等
+        bbox_head=dict(
+            type='Shared2FCBBoxHead',
+            in_channels=256,
+            fc_out_channels=1024,
+            roi_feat_size=7,
+            num_classes=num_classes,
+            bbox_coder=dict(
+                type='DeltaXYWHBBoxCoder',
+                target_means=[0., 0., 0., 0.],
+                target_stds=[0.1, 0.1, 0.2, 0.2]),
+            reg_class_agnostic=False,
+            loss_cls=dict(
+                type='CrossEntropyLoss', use_sigmoid=False, loss_weight=1.0),
+            loss_bbox=dict(type='SmoothL1Loss', loss_weight=1.0)),
+        mask_roi_extractor=dict(
+            type='SingleRoIExtractor',
+            roi_layer=dict(type='RoIAlign', output_size=14, sampling_ratio=0),
+            out_channels=256,
+            featmap_strides=[4, 8, 16, 32]),
+        mask_head=dict(
+            # type='RSPrompterAnchorMaskHead',
+            type='MyMaskHead',
+            # queries_num=prompt_shape[0],
+            decoder_layers=decoder_layers,
+            prompt_encoder=dict(
+                type='SAM_Prompt_Encoder',
+                hf_pretrain_name=hf_sam_pretrain_name,
+                init_cfg=dict(type='Pretrained', checkpoint=hf_sam_pretrain_ckpt_path),
+                # extra_config=dict(image_size=crop_size[0], image_embedding_size=crop_size[0]/16),
+                extra_config=dict(image_size=crop_size, image_embedding_size=(crop_size[0] // 16, crop_size[1] // 16)),
+            ),
+            mask_decoder=dict(
+                type='SAM_Mask_Decoder',
+                # type='SAM_Mask_Decoder_tmp', # 使用余弦相似度
+                # type='New_Mask_Decoder', # 去掉了mask_tokens和iou_tokens
+                hf_pretrain_name=hf_sam_pretrain_name,
+                init_cfg=dict(type='Pretrained', checkpoint=hf_sam_pretrain_ckpt_path)),
+            in_channels=256,
+            roi_feat_size=14,
+            per_pointset_point=prompt_shape[1],
+            with_sincos=True,
+            multimask_output=False,
+            class_agnostic=True,
+            loss_mask=dict(
+                type='CrossEntropyLoss', use_mask=True, loss_weight=1.0
+            ),
+            loss_boundary=dict(
+                type='LaplacianCrossEntropyLoss',
+                kernel_size=7,
+            ),
+        )
+    ),
+    # model training and testing settings
+    train_cfg=dict(
+        rpn=dict(
+            assigner=dict(
+                type='MaxIoUAssigner',
+                pos_iou_thr=0.7,
+                neg_iou_thr=0.3,
+                min_pos_iou=0.3,
+                match_low_quality=True,
+                ignore_iof_thr=-1),
+            sampler=dict(
+                type='RandomSampler',
+                num=256,
+                pos_fraction=0.5,
+                neg_pos_ub=-1,
+                add_gt_as_proposals=False),
+            allowed_border=-1,
+            pos_weight=-1,
+            debug=False),
+        rpn_proposal=dict(
+            nms_pre=2000,
+            max_per_img=1000,
+            nms=dict(type='nms', iou_threshold=0.7),
+            min_bbox_size=0),
+        rcnn=dict(
+            assigner=dict(
+                type='MaxIoUAssigner',
+                pos_iou_thr=0.5,
+                neg_iou_thr=0.5,
+                min_pos_iou=0.5,
+                match_low_quality=True,
+                ignore_iof_thr=-1),
+            sampler=dict(
+                type='RandomSampler',
+                num=256,
+                pos_fraction=0.25,
+                neg_pos_ub=-1,
+                add_gt_as_proposals=True),
+            mask_size=crop_size,
+            pos_weight=-1,
+            debug=False)),
+    # 测试配置（test_cfg）
+    test_cfg=dict(
+        rpn=dict(
+            nms_pre=1000, # NMS 前保留的候选框数量
+            max_per_img=1000, # RPN 阶段保留的最大候选框数量
+            nms=dict(type='nms', iou_threshold=0.7), # NMS 的 IOU 阈值
+            min_bbox_size=0), # 用于过滤掉尺寸过小的候选框，min_bbox_size=0 表示不过滤任何候选框。
+        rcnn=dict(
+            # score_thr=0.05, # 置信度分数阈值，只有超过此阈值的框才会保留
+            score_thr=0.05, # 置信度分数阈值，只有超过此阈值的框才会保留
+            nms=dict(type='nms', iou_threshold=0.5),
+            max_per_img=100, # 最终每张图像保留的最大检测框数量
+            mask_thr_binary=0.5) # 这是分割任务中使用的掩码阈值，当掩码得分大于 0.5 时，将该像素分类为前景，否则为背景。
+    )
+)
+
+# depth_root = "/data2/yihan/MyDataset/LIACi/LIACi_dataset_pretty/Depth_heat_rgb" # 由于UIIS的图像不全在同一个文件夹内，因此后面单独写，这里注释掉
+depth_suffix = '_heat.jpg'
+
+
+# DAv2
+depth_root_train="/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/train/data_depth_heat/"
+depth_root_val="/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/val/data_depth_heat/"
+depth_root_test="/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/test/data_depth_heat/"
+
+# DPT
+# depth_root_train="/data2/yihan/MyDataset/USIS10K/train_depth_heat/"
+# depth_root_val="/data2/yihan/MyDataset/USIS10K/val_depth_heat/"
+# depth_root_test="/data2/yihan/MyDataset/USIS10K/test_depth_heat/"
+
+# DAv1
+# depth_root_train="/data2/yihan/MyDataset/USIS10K/train_depth_heat_DAv1/"
+# depth_root_val="/data2/yihan/MyDataset/USIS10K/val_depth_heat_DAv1/"
+# depth_root_test="/data2/yihan/MyDataset/USIS10K/test_depth_heat_DAv1/"
+
+# ZoeDepth
+# depth_root_train="/data2/yihan/MyDataset/USIS10K/train_Depth_heat_ZoeDepth/"
+# depth_root_val="/data2/yihan/MyDataset/USIS10K/val_Depth_heat_ZoeDepth/"
+# depth_root_test="/data2/yihan/MyDataset/USIS10K/test_Depth_heat_ZoeDepth/"
+
+
+backend_args = None
+# train_pipeline = [
+#     dict(type='LoadImageFromFile', backend_args=backend_args, to_float32=True),
+#     # 用于读取深度图
+#     dict(type='LoadDepthFromFile',
+#          depth_root=depth_root_train,
+#          suffix=depth_suffix,
+#          to_float32=True),
+#     dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+#     dict(type='RandomFlip', prob=0.5),
+#     # large scale jittering
+#     dict(
+#         # 将图像的短边缩放到crop_size指定尺寸，同时保持宽高比，这一步处理后可能出现(296, 334)、(960, 512)等等形状的图像
+#         # RandomResize类实现时，实际上并没有按照crop_size指定的尺寸缩放，而是将短边缩放到了一个 0.1*crop_size ~ 2.0*crop_size的随机值
+#         type='RandomResize',
+#         scale=crop_size,
+#         ratio_range=(0.1, 2.0),
+#         resize_type='Resize',
+#         keep_ratio=True
+#     ),
+#     dict(
+#         type='RandomCrop',
+#         crop_size=crop_size,
+#         crop_type='absolute',
+#         recompute_bbox=True,
+#         allow_negative_crop=True),
+#     dict(type='FilterAnnotations', min_gt_bbox_wh=(1e-5, 1e-5), by_mask=True),
+#     dict(type='PackDetInputs')
+# ]
+
+train_pipeline = [
+    dict(type='LoadImageFromFile', backend_args=backend_args, to_float32=True),
+    # 用于读取深度图
+    dict(type='LoadDepthFromFile',
+         depth_root=depth_root_train,
+         suffix=depth_suffix,
+         to_float32=True),
+    dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+    dict(
+        type='RandomResize',
+        # scale=[(2048, 800), (2048, 1024)],
+        scale=[(1024, 512), (1024, 576)],
+        keep_ratio=True),
+    dict(type='RandomFlip', prob=0.5),
+    dict(type='PackDetInputs')
+]
+
+val_pipeline = [
+    dict(type='LoadImageFromFile', backend_args=backend_args, to_float32=True),
+    dict(type='LoadDepthFromFile',
+         depth_root=depth_root_val,
+         suffix=depth_suffix,
+         to_float32=True),
+    dict(type='Resize', scale=crop_size, keep_ratio=True),
+    # dict(type='Pad', size=crop_size, pad_val=dict(img=(0.406 * 255, 0.456 * 255, 0.485 * 255), masks=0)),
+    # 此处Pad操作使用的pad_val是RGBD四个通道的均值，这样在后面DualDetDataPreprocessor执行归一化操作时，通过(img-mean)/std，就使得图像
+    # 中经过了pad的部分变成 0了
+    # dict(type='Pad', size=crop_size, pad_val=dict(img=(0.406 * 255, 0.456 * 255, 0.485 * 255, 0.437*255, 0.484*255, 0.482*255), masks=0)),
+    # dict(type='DualPad', size=crop_size, pad_val=dict(img=(0.406 * 255, 0.456 * 255, 0.485 * 255), depth=(0.437*255, 0.484*255, 0.482*255), masks=0)),
+    # If you don't have a gt annotation, delete the pipeline
+    dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+    dict(
+        type='PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor'))
+]
+
+test_pipeline = [
+    dict(type='LoadImageFromFile', backend_args=backend_args, to_float32=True),
+    dict(type='LoadDepthFromFile',
+         depth_root=depth_root_test,
+         suffix=depth_suffix,
+         to_float32=True),
+    dict(type='Resize', scale=crop_size, keep_ratio=True),
+    # dict(type='Pad', size=crop_size, pad_val=dict(img=(0.406 * 255, 0.456 * 255, 0.485 * 255), masks=0)),
+    # 此处Pad操作使用的pad_val是RGBD四个通道的均值，这样在后面DualDetDataPreprocessor执行归一化操作时，通过(img-mean)/std，就使得图像
+    # 中经过了pad的部分变成 0了
+    # dict(type='Pad', size=crop_size, pad_val=dict(img=(0.406 * 255, 0.456 * 255, 0.485 * 255, 0.437*255, 0.484*255, 0.482*255), masks=0)),
+    dict(type='DualPad', size=(crop_size[1], crop_size[0]), pad_val=dict(img=(0.406 * 255, 0.456 * 255, 0.485 * 255), depth=(0.437*255, 0.484*255, 0.482*255), masks=0)),
+
+    dict(type='LoadAnnotations', with_bbox=True, with_mask=True),
+    dict(
+        type='PackDetInputs',
+        meta_keys=('img_id', 'img_path', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor'))
+]
+
+code_root = "/data2/yihan/MyProject/RSPrompter-release"
+
+''' 换数据集，修改这里 '''
+dataset_type = 'ZeroWasteDataset'
+data_root = "/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/"
+
+
+
+batch_size_per_gpu = 1
+num_workers = 2
+persistent_workers = True
+# num_workers = 0 # 2025-02-24为了调试，设为 0
+# persistent_workers = False # 2025-02-24为了调试，设为 False，注意如果num_workers=0，那么persistent_workers必须是False
+
+# seed = 42  # 设置你想要的随机数种子
+# deterministic = True  # 如果需要强制使用确定性算法（例如 CUDA 操作）
+
+train_dataloader = dict(
+    batch_size=batch_size_per_gpu,
+    num_workers=num_workers,
+    persistent_workers=persistent_workers,
+    # num_workers=0, # 2025-02-24为了调试，设为 0
+    # persistent_workers=False, # 如果num_workers=0，那么persistent_workers必须是False
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        depth_root=depth_root_train,
+        depth_suffix=depth_suffix,
+        # ann_file="/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/train/labels.json",
+        ann_file="/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/train/labels_with_01_frame_001160.json",
+        data_prefix=dict(img='train/data'),
+        pipeline=train_pipeline,
+    )
+)
+
+val_dataloader = dict(
+    batch_size=batch_size_per_gpu,
+    num_workers=num_workers,
+    persistent_workers=persistent_workers,
+    # num_workers=0, # 2025-02-24为了调试，设为 0
+    # persistent_workers=False, # 2025-02-24为了调试，设为 False，注意如果num_workers=0，那么persistent_workers必须是False
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        depth_suffix=depth_suffix,
+
+        # depth_root=depth_root_val,
+        # ann_file="/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/val/labels.json",
+        # data_prefix=dict(img='val/data'),
+        # pipeline=val_pipeline,
+
+        depth_root=depth_root_test,
+        ann_file="/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/test/labels.json",
+        data_prefix=dict(img='test/data'),
+        pipeline=test_pipeline,
+    )
+)
+
+# test_dataloader = val_dataloader
+test_dataloader = dict(
+    batch_size=batch_size_per_gpu,
+    num_workers=num_workers,
+    persistent_workers=persistent_workers,
+    # num_workers=0, # 2025-02-24为了调试，设为 0
+    # persistent_workers=False, # 2025-02-24为了调试，设为 False，注意如果num_workers=0，那么persistent_workers必须是False
+    dataset=dict(
+        type=dataset_type,
+        data_root=data_root,
+        depth_root=depth_root_test,
+        depth_suffix=depth_suffix,
+        ann_file="/data2/yihan/MyDataset/zerowaste-f-final/splits_final_deblurred/test/labels.json",
+        data_prefix=dict(img='test/data'),
+        pipeline=test_pipeline,
+    )
+)
+
+# resume = True
+# load_from = "/data2/yihan/MyProject/RSPrompter-release/work_dirs/RGB+Depth/tmp/epoch_42.pth"
+resume = False
+load_from = None
+
+base_lr = 0.0002
+# base_lr = 0.0001
+max_epochs = 80
+
+train_cfg = dict(max_epochs=max_epochs, val_interval=1)
+param_scheduler = [
+    dict(
+        type='LinearLR', start_factor=0.001, by_epoch=False, begin=0, end=50),
+    dict(
+        type='CosineAnnealingLR',
+        eta_min=base_lr * 0.001,
+        begin=1,
+        end=max_epochs,
+        T_max=max_epochs,
+        by_epoch=True
+    )
+]
+
+#### AMP training config
+runner_type = 'Runner'
+optim_wrapper = dict(
+    type='AmpOptimWrapper',
+    dtype='float16',
+    optimizer=dict(
+        type='AdamW',
+        lr=base_lr,
+        weight_decay=0.05),
+    accumulative_counts=4
+)
+val_evaluator = dict(
+    type='CocoMetric',
+    metric=['bbox', 'segm'],
+    format_only=False,
+    backend_args=backend_args,
+    classwise=True,
+)
+test_evaluator=val_evaluator
+
+# 如果训练集和测试集不是同一个，就使用EvalTestHook
+# 通过钩子实现：每个epoch跑完后，既在验证集上计算指标（验证），也在测试集上计算指标（测试）
+# custom_hooks.append(
+#     dict(
+#         type='EvalTestHook',
+#         dataloader=test_dataloader # 或你实际配置的 test dataloader
+#     )
+# )
+
